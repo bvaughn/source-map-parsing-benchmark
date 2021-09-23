@@ -1,249 +1,316 @@
-import {isBrowser, isNode} from 'browser-or-node';
-import {Suite} from './benchmark.mjs';
+import { isBrowser, isNode } from "browser-or-node";
+import { Suite } from "./benchmark.mjs";
 
-import SOURCES from './sources.mjs';
-import sourceMapJSON from './source-map.json';
+import SOURCES from "./sources.mjs";
+import sourceMapJSON from "./source-map.json";
 
-async function test() {
+const sourceMapText = JSON.stringify(sourceMapJSON);
+
+async function runTests() {
   const LIBRARIES = {
-    'Chrome DevTools parser': chromeDevTools(),
-    'source-map': sourceMap(),
-    'source-map-js': sourceMapJS(),
-    'sourcemap-codec': sourceMapCodec(),
+    "Chrome DevTools parser": chromeDevTools(),
+    "source-map": sourceMap(),
+    "source-map-js": sourceMapJS(),
+    "sourcemap-codec": sourceMapCodec(),
+    "sourcemap-codec-streaming": sourceMapCodecStreaming(),
   };
 
   if (isNode) {
-    LIBRARIES['fast-source-map'] = fastSourceMap();
+    LIBRARIES["fast-source-map"] = fastSourceMap();
   }
 
-  const parseSuite = new Suite('Parse');
-  const parseAndUseSuite = new Suite('Parse and use');
+  const parseSuite = new Suite("Parse");
+  const findSourcesSuite = new Suite("Find sources");
+  const parseAndFindSourcesSuite = new Suite("Parse and find sources");
 
   for (let name in LIBRARIES) {
-    const {parse, parseAndUse} = LIBRARIES[name];
-    parseSuite.add(name, () => parse(sourceMapJSON));
-    parseAndUseSuite.add(name, () => parseAndUse(sourceMapJSON, SOURCES));
+    const { parse, findSources, parseAndFindSources } = LIBRARIES[name];
+    parseSuite.add(name, parse);
+    findSourcesSuite.add(name, findSources);
+    parseAndFindSourcesSuite.add(name, parseAndFindSources);
   }
 
   await parseSuite.run();
-  await parseAndUseSuite.run();
+  await findSourcesSuite.run();
+  await parseAndFindSourcesSuite.run();
 }
 
-test();
+runTests();
+
+// GoogleChrome Developer Tools source-map parsing
+function chromeDevTools() {
+  function noop() {}
+
+  let textSourceMap = null;
+
+  async function init() {
+    const ChromeDevToolsSourceMap = await import("./lib/ChromeSourceMap.mjs");
+    const TextSourceMap = ChromeDevToolsSourceMap.TextSourceMap;
+
+    textSourceMap = new TextSourceMap(
+      "compiled.js",
+      "compiled.js.map",
+      sourceMapJSON
+    );
+  }
+
+  async function findSources() {
+    SOURCES.forEach(({ lineNumber, columnNumber }) => {
+      const result = textSourceMap.findEntry(lineNumber, columnNumber);
+      const sourceContent = textSourceMap.embeddedContentByURL(
+        result.sourceURL
+      );
+    });
+  }
+
+  async function teardown() {
+    textSourceMap.dispose();
+    textSourceMap = null;
+  }
+
+  return {
+    parse: {
+      init: noop,
+      run: async () => {
+        await init();
+        await teardown();
+      },
+      teardown: noop,
+    },
+    findSources: {
+      init,
+      run: findSources,
+      teardown,
+    },
+    parseAndFindSources: {
+      init: noop,
+      run: async () => {
+        await init();
+        await findSources();
+        await teardown();
+      },
+      teardown: noop,
+    },
+  };
+}
 
 // https://www.npmjs.com/package/source-map
 function sourceMap() {
-  async function initSourceMapConsumer() {
-    const SourceMap = await import('source-map');
+  function noop() {}
+
+  let sourceMapConsumer = null;
+
+  async function init() {
+    const SourceMap = await import("source-map");
     const SourceMapConsumer = SourceMap.SourceMapConsumer;
     if (isBrowser) {
       SourceMapConsumer.initialize({
-        'lib/mappings.wasm': 'https://unpkg.com/source-map@0.7.3/lib/mappings.wasm',
+        "lib/mappings.wasm":
+          "https://unpkg.com/source-map@0.7.3/lib/mappings.wasm",
       });
     }
-    return SourceMapConsumer;
+
+    sourceMapConsumer = await new SourceMapConsumer(sourceMapJSON);
   }
 
-  async function parse(sourceMapJSON) {
-    const SourceMapConsumer = await initSourceMapConsumer();
-    const sourceConsumer = await new SourceMapConsumer(sourceMapJSON);
-
-    sourceConsumer.destroy();
-  }
-
-  async function parseAndUse(sourceMapJSON, sources) {
-    const SourceMapConsumer = await initSourceMapConsumer();
-    const sourceConsumer = await new SourceMapConsumer(sourceMapJSON);
-
-    sources.forEach(({ lineNumber, columnNumber }) => {
-      const {column, line, source} = sourceConsumer.originalPositionFor({
+  async function findSources() {
+    SOURCES.forEach(({ lineNumber, columnNumber }) => {
+      const { column, line, source } = sourceMapConsumer.originalPositionFor({
         line: lineNumber,
 
         // Column numbers are represented differently between tools/engines.
         // Error.prototype.stack columns are 1-based (like most IDEs) but ASTs are 0-based.
         column: columnNumber - 1,
       });
-      const sourceContent = sourceConsumer.sourceContentFor(source, true);
+      const sourceContent = sourceMapConsumer.sourceContentFor(source, true);
     });
+  }
 
-    sourceConsumer.destroy();
+  async function teardown() {
+    sourceMapConsumer.destroy();
+    sourceMapConsumer = null;
   }
 
   return {
-    parse,
-    parseAndUse,
+    parse: {
+      init: noop,
+      run: async () => {
+        await init();
+        await teardown();
+      },
+      teardown: noop,
+    },
+    findSources: {
+      init,
+      run: findSources,
+      teardown,
+    },
+    parseAndFindSources: {
+      init: noop,
+      run: async () => {
+        await init();
+        await findSources();
+        await teardown();
+      },
+      teardown: noop,
+    },
   };
 }
 
 // https://www.npmjs.com/package/source-map-js
 function sourceMapJS() {
-  async function initSourceMapConsumer() {
-    const SourceMapJS = await import('source-map-js');
+  function noop() {}
+
+  let sourceMapConsumer = null;
+
+  async function init() {
+    const SourceMapJS = await import("source-map-js");
     const SourceMapConsumer = SourceMapJS.SourceMapConsumer;
-    return SourceMapConsumer;
+
+    sourceMapConsumer = new SourceMapConsumer(sourceMapJSON);
   }
 
-  async function parse(sourceMapJSON) {
-    const SourceMapConsumer = await initSourceMapConsumer();
-    const sourceConsumer = new SourceMapConsumer(sourceMapJSON);
-  }
-
-  async function parseAndUse(sourceMapJSON, sources) {
-    const SourceMapConsumer = await initSourceMapConsumer();
-    const sourceConsumer = new SourceMapConsumer(sourceMapJSON);
-
-    sources.forEach(({ lineNumber, columnNumber }) => {
-      const {column, line, source} = sourceConsumer.originalPositionFor({
+  async function findSources() {
+    SOURCES.forEach(({ lineNumber, columnNumber }) => {
+      const { column, line, source } = sourceMapConsumer.originalPositionFor({
         line: lineNumber,
 
         // Column numbers are represented differently between tools/engines.
         // Error.prototype.stack columns are 1-based (like most IDEs) but ASTs are 0-based.
         column: columnNumber - 1,
       });
-      const sourceContent = sourceConsumer.sourceContentFor(source, true);
+      const sourceContent = sourceMapConsumer.sourceContentFor(source, true);
     });
   }
 
   return {
-    parse,
-    parseAndUse,
-  };
-}
-
-// GoogleChrome Developer Tools source-map parsing
-function chromeDevTools() {
-  async function initTextSourceMap() {
-    const ChromeDevToolsSourceMap = await import('./lib/ChromeSourceMap.mjs');
-    const TextSourceMap = ChromeDevToolsSourceMap.TextSourceMap;
-    return TextSourceMap;
-  }
-
-  async function parse(sourceMapJSON) {
-    const TextSourceMap = await initTextSourceMap();
-    const textSourceMap = new TextSourceMap('compiled.js', 'compiled.js.map', sourceMapJSON);
-
-    textSourceMap.dispose();
-  }
-
-  async function parseAndUse(sourceMapJSON, sources) {
-    const TextSourceMap = await initTextSourceMap();
-    const textSourceMap = new TextSourceMap('compiled.js', 'compiled.js.map', sourceMapJSON);
-
-    sources.forEach(({ lineNumber, columnNumber }) => {
-      const result = textSourceMap.findEntry(lineNumber, columnNumber);
-      const sourceContent = textSourceMap.embeddedContentByURL(result.sourceURL);
-    });
-
-    textSourceMap.dispose();
-  }
-
-  return {
-    parse,
-    parseAndUse,
+    parse: {
+      init: noop,
+      run: init,
+      teardown: noop,
+    },
+    findSources: {
+      init,
+      run: findSources,
+      teardown: noop,
+    },
+    parseAndFindSources: {
+      init: noop,
+      run: async () => {
+        await init();
+        await findSources();
+      },
+      teardown: noop,
+    },
   };
 }
 
 // https://www.npmjs.com/package/@bloomberg/pasta-sourcemaps
 function sourceMapCodec() {
-  async function initDecoder() {
-    const SourceMapCodec = await import('sourcemap-codec');
-    const decode = SourceMapCodec.decode;
-    return decode;
+  function noop() {}
+
+  let sourceMapConsumer = null;
+
+  async function init() {
+    const SourceMapConsumerModule = await import("./lib/SourceMapConsumer.mjs");
+    const SourceMapConsumer = SourceMapConsumerModule.default;
+
+    sourceMapConsumer = new SourceMapConsumer(sourceMapJSON);
   }
 
-  async function parse(sourceMapJSON) {
-    const decode = await initDecoder();
-    const decodedMappings = new decode(sourceMapJSON.mappings);
-  }
-
-  async function parseAndUse(sourceMapJSON, sources) {
-    const decode = await initDecoder();
-    const decodedMappings = new decode(sourceMapJSON.mappings);
-
-    sources.forEach(({ lineNumber, columnNumber }) => {
-      // Parse and extract the AST from the source map.
-      // Now that the source map has been loaded, extract the original source for later.
-      const lineMappings = decodedMappings[lineNumber - 1];
-
-      // Error.prototype.stack columns are 1-based (like most IDEs) but ASTs are 0-based.
-      const targetColumnNumber = columnNumber - 1;
-
-      let startIndex = 0;
-      let stopIndex = lineMappings.length - 1;
-      let nearestEntry = null;
-      let nearestIndex = -1;
-      while (startIndex <= stopIndex) {
-        nearestIndex = Math.floor((stopIndex + startIndex) / 2);
-        nearestEntry = lineMappings[nearestIndex];
-
-        const currentColumn = nearestEntry[0];
-        if (currentColumn === targetColumnNumber) {
-          break;
-        } else {
-          if (currentColumn > targetColumnNumber) {
-            if (stopIndex - nearestIndex > 0) {
-              stopIndex = nearestIndex;
-            } else {
-              nearestIndex = stopIndex;
-              nearestEntry = lineMappings[nearestIndex];
-              break;
-            }
-          } else {
-            if (nearestIndex - startIndex > 0) {
-              startIndex = nearestIndex;
-            } else {
-              nearestIndex = startIndex;
-              nearestEntry = lineMappings[nearestIndex];
-              break;
-            }
-          }
-        }
-      }
-
-      // We have found either the exact element, or the next-closest element than
-      // the one we are searching for. However, there may be more than one such
-      // element. Make sure we always return the smallest of these.
-      while (nearestIndex > 0) {
-        const previousEntry = lineMappings[nearestIndex - 1];
-        const currentColumn = previousEntry[0];
-        if (currentColumn !== targetColumnNumber) {
-          break;
-        }
-        nearestIndex--;
-      }
-
-      if (nearestEntry !== null) {
-        const sourceIndex = nearestEntry[1];
-        const line = nearestEntry[2] + 1;
-        const column = nearestEntry[3];
-
-        const sourceContent = sourceMapJSON.sourcesContent[sourceIndex];
-      }
+  async function findSources() {
+    SOURCES.forEach(({ lineNumber, columnNumber }) => {
+      const { column, line, sourceContent } =
+        sourceMapConsumer.originalPositionFor({ columnNumber, lineNumber });
+      //console.log(line, column);
     });
   }
 
   return {
-    parse,
-    parseAndUse,
+    parse: {
+      init: noop,
+      run: init,
+      teardown: noop,
+    },
+    findSources: {
+      init,
+      run: findSources,
+      teardown: noop,
+    },
+    parseAndFindSources: {
+      init: noop,
+      run: async () => {
+        await init();
+        await findSources();
+      },
+      teardown: noop,
+    },
+  };
+}
+
+// https://www.npmjs.com/package/@bloomberg/pasta-sourcemaps
+function sourceMapCodecStreaming() {
+  function noop() {}
+
+  let sourceMapConsumer = null;
+
+  async function init() {
+    const SourceMapConsumerModule = await import(
+      "./lib/SourceMapConsumerStreaming.mjs"
+    );
+    const SourceMapConsumer = SourceMapConsumerModule.default;
+
+    sourceMapConsumer = new SourceMapConsumer(sourceMapText, sourceMapJSON);
+  }
+
+  async function findSources() {
+    SOURCES.forEach(({ lineNumber, columnNumber }) => {
+      const { column, line, sourceContent } =
+        sourceMapConsumer.originalPositionFor({ columnNumber, lineNumber });
+      //console.log(line, column);
+    });
+  }
+
+  return {
+    parse: {
+      init: noop,
+      run: init,
+      teardown: noop,
+    },
+    findSources: {
+      init,
+      run: findSources,
+      teardown: noop,
+    },
+    parseAndFindSources: {
+      init: noop,
+      run: async () => {
+        await init();
+        await findSources();
+      },
+      teardown: noop,
+    },
   };
 }
 
 // https://www.npmjs.com/package/fast-source-map
 function fastSourceMap() {
-  async function initDecoder(sourceMapJSON) {
+  function noop() {}
+
+  let decodedMappings = null;
+
+  async function init() {
     const mappings = sourceMapJSON.mappings;
 
     const byteArray = new Uint8Array(mappings.length);
     const buffer = Buffer.from(byteArray.buffer);
-    buffer.write(mappings, 0, 'ascii');
+    buffer.write(mappings, 0, "ascii");
 
     // The actual 'fast-source-map' NPM module is really outdated.
     // This fork is a little newer.
-    const {
-      Decoder,
-      IntBufferReader,
-      MappingsDecoder,
-    } = await import('@elsassph/fast-source-map');
+    const { Decoder, IntBufferReader, MappingsDecoder } = await import(
+      "@elsassph/fast-source-map"
+    );
 
     const reader = new IntBufferReader(byteArray, 0, byteArray.length);
     const decoder = new Decoder();
@@ -251,72 +318,63 @@ function fastSourceMap() {
 
     mappingsDecoder.decode(reader);
 
-    return decoder.mappings;
+    decodedMappings = decoder.mappings;
   }
 
-  async function parse(sourceMapJSON) {
-    const decodedMappings = await initDecoder(sourceMapJSON);
-  }
-
-  async function parseAndUse(sourceMapJSON, sources) {
-    const decodedMappings = await initDecoder(sourceMapJSON);
-
-    sources.forEach(({ lineNumber, columnNumber }) => {
-      // Parse and extract the AST from the source map.
-      // Now that the source map has been loaded, extract the original source for later.
-      const lineMappings = decodedMappings[lineNumber - 1];
-
+  async function findSources() {
+    SOURCES.forEach(({ lineNumber, columnNumber }) => {
       // Error.prototype.stack columns are 1-based (like most IDEs) but ASTs are 0-based.
       const targetColumnNumber = columnNumber - 1;
 
+      const lineMappings = decodedMappings[lineNumber - 1];
+
+      let nearestEntry = null;
+
       let startIndex = 0;
       let stopIndex = lineMappings.length - 1;
-      let nearestEntry = null;
-      let nearestIndex = -1;
+      let index = -1;
       while (startIndex <= stopIndex) {
-        nearestIndex = Math.floor((stopIndex + startIndex) / 2);
-        nearestEntry = lineMappings[nearestIndex];
+        index = Math.floor((stopIndex + startIndex) / 2);
+        nearestEntry = lineMappings[index];
 
-        const currentColumn = nearestEntry[0];
+        const currentColumn = nearestEntry.srcCol;
         if (currentColumn === targetColumnNumber) {
           break;
         } else {
           if (currentColumn > targetColumnNumber) {
-            if (stopIndex - nearestIndex > 0) {
-              stopIndex = nearestIndex;
+            if (stopIndex - index > 0) {
+              stopIndex = index;
             } else {
-              nearestIndex = stopIndex;
-              nearestEntry = lineMappings[nearestIndex];
+              index = stopIndex;
               break;
             }
           } else {
-            if (nearestIndex - startIndex > 0) {
-              startIndex = nearestIndex;
+            if (index - startIndex > 0) {
+              startIndex = index;
             } else {
-              nearestIndex = startIndex;
-              nearestEntry = lineMappings[nearestIndex];
+              index = startIndex;
               break;
             }
           }
         }
       }
 
-      // We have found either the exact element, or the next-closest element than
-      // the one we are searching for. However, there may be more than one such
-      // element. Make sure we always return the smallest of these.
-      while (nearestIndex > 0) {
-        const previousEntry = lineMappings[nearestIndex - 1];
-        const currentColumn = previousEntry[0];
+      // We have found either the exact element, or the next-closest element.
+      // However there may be more than one such element.
+      // Make sure we always return the smallest of these.
+      while (index > 0) {
+        const previousEntry = lineMappings[index - 1];
+        const currentColumn = previousEntry.srcCol;
         if (currentColumn !== targetColumnNumber) {
           break;
         }
-        nearestIndex--;
+        index--;
       }
 
       if (nearestEntry !== null) {
-        const sourceIndex = nearestEntry[1];
-        const line = nearestEntry[2] + 1;
-        const column = nearestEntry[3];
+        const sourceIndex = nearestEntry.src;
+        const line = nearestEntry.srcLine + 1;
+        const column = nearestEntry.srcCol;
 
         const sourceContent = sourceMapJSON.sourcesContent[sourceIndex];
       }
@@ -324,36 +382,23 @@ function fastSourceMap() {
   }
 
   return {
-    parse,
-    parseAndUse,
+    parse: {
+      init: noop,
+      run: init,
+      teardown: noop,
+    },
+    findSources: {
+      init,
+      run: findSources,
+      teardown: noop,
+    },
+    parseAndFindSources: {
+      init: noop,
+      run: async () => {
+        await init();
+        await findSources();
+      },
+      teardown: noop,
+    },
   };
 }
-
-// https://www.npmjs.com/package/@bloomberg/pasta-sourcemaps
-// Pasta can only work with its own "enriched" source-map format so we can't use it.
-// function pastaSourceMaps() {
-//   async function initSourceMapDecoder() {
-//     const PastaSourceMaps = await import('@bloomberg/pasta-sourcemaps');
-//     const SourceMapDecoder = PastaSourceMaps.SourceMapDecoder;
-//     return SourceMapDecoder;
-//   }
-
-//   async function parse(sourceMapJSON) {
-//     const SourceMapDecoder = await initSourceMapDecoder();
-//     const sourceMapDecoder = new SourceMapDecoder(sourceMapJSON);
-//   }
-
-//   async function parseAndUse(sourceMapJSON, sources) {
-//     const SourceMapDecoder = await initSourceMapDecoder();
-//     const sourceMapDecoder = new SourceMapDecoder(sourceMapJSON);
-
-//     sources.forEach(({ lineNumber, columnNumber }) => {
-//       const result = sourceMapDecoder.decode('compiled.js', lineNumber, columnNumber);
-//     });
-//   }
-
-//   return {
-//     parse,
-//     parseAndUse,
-//   };
-// }

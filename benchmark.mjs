@@ -1,4 +1,4 @@
-import {linearRegression} from 'simple-statistics';
+import { linearRegression } from "simple-statistics";
 
 export function Suite(suiteName) {
   const tests = new Map();
@@ -7,21 +7,27 @@ export function Suite(suiteName) {
     tests.set(testName, test);
   }
 
-  async function run({
-    minRuns = 5,
-    maxRuns = 150,
-  } = {}) {
-    console.group(`Suite:${suiteName}`);
+  async function run({ minRuns = 5, maxRuns = 50 } = {}) {
+    let longestTestNameLength = 0;
+    for (let [testName] of tests) {
+      longestTestNameLength = Math.max(longestTestNameLength, testName.length);
+    }
+
+    const maxRunsStringLength = ("" + maxRuns).length;
+
+    console.group(suiteName);
+
     for (let [testName, test] of tests) {
-      console.group(`Test:${testName}`);
+      await test.init();
+
       const samples = [];
       for (let i = 0; i < maxRuns; i++) {
         const startTime = Date.now();
-        await test();
+        await test.run();
         const stopTime = Date.now();
         const duration = stopTime - startTime;
 
-        samples.push([i, duration])
+        samples.push([i, duration]);
 
         if (i >= minRuns) {
           const confidence = linearRegression(samples).m >= 0;
@@ -31,12 +37,24 @@ export function Suite(suiteName) {
         }
       }
 
-      const average = samples.reduce((reduced, current) => current[1] + reduced, 0) / samples.length;
+      await test.teardown();
 
-      console.log(`samples: ${samples.length}`);
-      console.log(`average: ${format(average)}ms`);
-      console.groupEnd();
+      const average =
+        samples.reduce((reduced, current) => current[1] + reduced, 0) /
+        samples.length;
+
+      let samplesString = `${samples.length}`;
+      samplesString = `${samplesString}${" ".repeat(
+        maxRunsStringLength - samplesString.length
+      )}`;
+
+      console.log(
+        `${testName}  ${" ".repeat(
+          longestTestNameLength - testName.length
+        )}  ${samplesString} samples    ${format(average)}ms`
+      );
     }
+
     console.groupEnd();
   }
 
